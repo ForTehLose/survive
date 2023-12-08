@@ -1,7 +1,9 @@
-use bevy::prelude::*;
+use bevy::{prelude::*, asset::AssetMetaCheck};
 
 fn main() {
     App::new()
+        // Never attempts to look up meta files. The default meta configuration will be used for each asset.
+        .insert_resource(AssetMetaCheck::Never)
         .insert_resource(ClearColor(
             Color::hex("#071c42").expect("a valid hex color"),
         ))
