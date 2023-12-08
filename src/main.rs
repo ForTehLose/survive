@@ -1,4 +1,4 @@
-use bevy::{prelude::*, asset::AssetMetaCheck};
+use bevy::{asset::AssetMetaCheck, prelude::*};
 
 fn main() {
     App::new()
