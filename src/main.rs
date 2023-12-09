@@ -1,4 +1,8 @@
-use bevy::{asset::AssetMetaCheck, prelude::*};
+use bevy::{
+    asset::AssetMetaCheck,
+    prelude::*,
+    window::{CursorGrabMode, PrimaryWindow},
+};
 
 fn main() {
     App::new()
@@ -8,14 +12,105 @@ fn main() {
             Color::hex("#071c42").expect("a valid hex color"),
         ))
         .add_plugins(DefaultPlugins)
+        //add framepacing to help with input lag
+        .add_plugins(bevy_framepace::FramepacePlugin)
         .add_systems(Startup, setup)
+        .init_resource::<MousePosition>()
+        .add_systems(PreUpdate, update_mouse_position_system)
+        .add_systems(Update, grab_mouse)
         .run();
 }
 
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
-    commands.spawn(Camera2dBundle::default());
-    commands.spawn(SpriteBundle {
-        texture: asset_server.load("playerShip1_orange.png"),
-        ..Default::default()
-    });
+    //spawn camera
+    commands.spawn((Camera2dBundle::default(), MainCamera));
+    //spawn mouse sprite
+    commands.spawn((
+        SpriteBundle {
+            texture: asset_server.load("crosshair/crossair_white.png"),
+            ..Default::default()
+        },
+        Mouse,
+    ));
+    //spawn ship entity
+    commands.spawn((
+        SpriteBundle {
+            texture: asset_server.load("playerShip1_orange.png"),
+            ..Default::default()
+        },
+        Ship,
+    ));
+}
+
+/// We will store the world position of the mouse cursor here.
+#[derive(Resource, Default)]
+struct MousePosition(Vec2);
+
+/// Used to help identify our main camera
+#[derive(Component)]
+struct MainCamera;
+
+#[derive(Component)]
+struct Mouse;
+
+#[derive(Component)]
+struct Ship;
+
+fn update_mouse_position_system(
+    mut mouse_position_resource: ResMut<MousePosition>,
+    window_query: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
+    mut mouse_entity_query: Query<&mut Transform, With<Mouse>>,
+) {
+    // get the camera info and transform
+    // assuming there is exactly one main camera entity, so Query::single() is OK
+    let (camera, camera_transform) = camera_query.single();
+
+    // There is only one primary window, so we can similarly get it from the query:
+    let window = window_query.single();
+
+    //try to get the mouse entity
+    let mouse_entity = mouse_entity_query.get_single_mut();
+
+    // check if the cursor is inside the window and get its position
+    // then, ask bevy to convert into world coordinates, and truncate to discard Z
+    if let Some(world_position) = window
+        .cursor_position()
+        .and_then(|cursor| camera.viewport_to_world(camera_transform, cursor))
+        .map(|ray| ray.origin.truncate())
+    {
+        //print what we found
+        // eprintln!("World coords: {}/{}", world_position.x, world_position.y);
+        //update the resource
+        mouse_position_resource.0 = world_position;
+        //if we have an entity update it
+        match mouse_entity {
+            Ok(mut mouse) => {
+                mouse.translation = world_position.extend(0.0);
+            }
+            Err(_) => {
+                eprintln!("no mouse found");
+            }
+        }
+    }
+}
+
+// This system grabs the mouse when the left mouse button is pressed
+// and releases it when the escape key is pressed
+fn grab_mouse(
+    mut windows: Query<&mut Window>,
+    mouse: Res<Input<MouseButton>>,
+    key: Res<Input<KeyCode>>,
+) {
+    let mut window = windows.single_mut();
+
+    if mouse.just_pressed(MouseButton::Left) {
+        window.cursor.visible = false;
+        window.cursor.grab_mode = CursorGrabMode::Locked;
+    }
+
+    if key.just_pressed(KeyCode::Escape) {
+        window.cursor.visible = true;
+        window.cursor.grab_mode = CursorGrabMode::None;
+    }
 }

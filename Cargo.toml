@@ -17,6 +17,7 @@ opt-level = 3
 
 [dependencies]
 bevy = "0.12.1"
+bevy_framepace = "0.14.1"
 
 [lints.clippy]
 type_complexity = "allow"
