@@ -80,7 +80,7 @@ fn update_mouse_position_system(
         .map(|ray| ray.origin.truncate())
     {
         //print what we found
-        // eprintln!("World coords: {}/{}", world_position.x, world_position.y);
+        info!("World coords: {}/{}", world_position.x, world_position.y);
         //update the resource
         mouse_position_resource.0 = world_position;
         //if we have an entity update it
@@ -89,7 +89,7 @@ fn update_mouse_position_system(
                 mouse.translation = world_position.extend(0.0);
             }
             Err(_) => {
-                eprintln!("no mouse found");
+                info!("no mouse found");
             }
         }
     }
@@ -102,15 +102,18 @@ fn grab_mouse(
     mouse: Res<Input<MouseButton>>,
     key: Res<Input<KeyCode>>,
 ) {
-    let mut window = windows.single_mut();
+    #[cfg(not(target_os = "wasm32-unknown-unknown"))]
+    {
+        let mut window = windows.single_mut();
 
-    if mouse.just_pressed(MouseButton::Left) {
-        window.cursor.visible = false;
-        window.cursor.grab_mode = CursorGrabMode::Locked;
-    }
+        if mouse.just_pressed(MouseButton::Left) {
+            window.cursor.visible = false;
+            window.cursor.grab_mode = CursorGrabMode::Locked;
+        }
 
-    if key.just_pressed(KeyCode::Escape) {
-        window.cursor.visible = true;
-        window.cursor.grab_mode = CursorGrabMode::None;
+        if key.just_pressed(KeyCode::Escape) {
+            window.cursor.visible = true;
+            window.cursor.grab_mode = CursorGrabMode::None;
+        }
     }
 }
