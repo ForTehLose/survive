@@ -1,3 +1,5 @@
+use std::f32::consts::PI;
+
 use bevy::{
     asset::AssetMetaCheck,
     prelude::*,
@@ -18,6 +20,8 @@ fn main() {
         .init_resource::<MousePosition>()
         .add_systems(PreUpdate, update_mouse_position_system)
         .add_systems(Update, grab_mouse)
+        .add_systems(Update, look_at_mouse)
+        .add_systems(Update, proto_move)
         .run();
 }
 
@@ -39,6 +43,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
             ..Default::default()
         },
         Ship,
+        LookAtMouse,
     ));
 }
 
@@ -80,7 +85,7 @@ fn update_mouse_position_system(
         .map(|ray| ray.origin.truncate())
     {
         //print what we found
-        info!("World coords: {}/{}", world_position.x, world_position.y);
+        // info!("World coords: {}/{}", world_position.x, world_position.y);
         //update the resource
         mouse_position_resource.0 = world_position;
         //if we have an entity update it
@@ -114,6 +119,53 @@ fn grab_mouse(
         if key.just_pressed(KeyCode::Escape) {
             window.cursor.visible = true;
             window.cursor.grab_mode = CursorGrabMode::None;
+        }
+    }
+}
+
+#[derive(Component)]
+struct LookAtMouse;
+
+fn look_at_mouse(
+    mouse_entity_query: Query<&Transform, With<Mouse>>,
+    mut observers_query: Query<&mut Transform, (With<LookAtMouse>, Without<Mouse>)>,
+) {
+    //get the mouse once
+    let mouse_entity = mouse_entity_query.get_single();
+    match mouse_entity {
+        Ok(mouse_transform) => {
+            for mut entity_transform in observers_query.iter_mut() {
+                let diff = mouse_transform.translation.xy() - entity_transform.translation.xy();
+                let angle = diff.y.atan2(diff.x) - PI / 2.0;
+                info!("diff: {}, angle: {}", diff, angle);
+                entity_transform.rotation = Quat::from_rotation_z(angle);
+            }
+        }
+        Err(_) => {
+            info!("no mouse entity, so we cant look at it");
+        }
+    }
+}
+
+fn proto_move(mut ship_query: Query<&mut Transform, With<Ship>>, key: Res<Input<KeyCode>>) {
+    if key.pressed(KeyCode::W) {
+        for mut ship_transform in ship_query.iter_mut() {
+            ship_transform.translation.y += 1.0;
+        }
+    }
+    if key.pressed(KeyCode::S) {
+        for mut ship_transform in ship_query.iter_mut() {
+            ship_transform.translation.y -= 1.0;
+        }
+    }
+    if key.pressed(KeyCode::A) {
+        for mut ship_transform in ship_query.iter_mut() {
+            ship_transform.translation.x -= 1.0;
+        }
+    }
+    if key.pressed(KeyCode::D) {
+        for mut ship_transform in ship_query.iter_mut() {
+            ship_transform.translation.x += 1.0;
         }
     }
 }
