@@ -107,13 +107,13 @@ fn grab_mouse(
     mouse: Res<Input<MouseButton>>,
     key: Res<Input<KeyCode>>,
 ) {
-    #[cfg(not(target_os = "wasm32-unknown-unknown"))]
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     {
         let mut window = windows.single_mut();
 
         if mouse.just_pressed(MouseButton::Left) {
             window.cursor.visible = false;
-            window.cursor.grab_mode = CursorGrabMode::Locked;
+            window.cursor.grab_mode = CursorGrabMode::Confined;
         }
 
         if key.just_pressed(KeyCode::Escape) {
