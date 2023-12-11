@@ -53,71 +53,87 @@ fn main() {
         .add_systems(Update, handle_collisions)
         .add_systems(Update, handle_destroyed_asteroids)
         .add_systems(Update, handle_upgrades.after(handle_destroyed_asteroids))
+        .add_systems(Update, handle_ship_damage.after(handle_collisions))
         .add_systems(Update, wrapper)
+        .add_systems(
+            PreUpdate,
+            handle_start_event.before(update_mouse_position_system),
+        )
+        .add_event::<StartGameEvent>()
         //physics
         .add_plugins(PhysicsPlugins::default())
         //no gravity
         .insert_resource(Gravity(Vec2::ZERO))
-        .add_plugins(PhysicsDebugPlugin::default())
+        // .add_plugins(PhysicsDebugPlugin::default())
         .init_resource::<Score>()
         .add_event::<WeaponUpgrade>()
         .run();
 }
 
-fn setup(
+fn setup(mut start_event_writer: EventWriter<StartGameEvent>) {
+    start_event_writer.send(StartGameEvent);
+}
+
+fn handle_start_event(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut asteroid_event_writer: EventWriter<SpawnAsteroidEvent>,
+    mut event_reader: EventReader<StartGameEvent>,
 ) {
-    //spawn camera
-    commands.spawn((Camera2dBundle::default(), MainCamera));
-    //spawn mouse sprite
-    commands.spawn((
-        SpriteBundle {
-            texture: asset_server.load("crosshair/crossair_white.png"),
-            ..Default::default()
-        },
-        Mouse,
-    ));
-    //spawn ship entity
-    commands.spawn((
-        SpriteBundle {
-            texture: asset_server.load("playerShip1_orange.png"),
-            transform: Transform {
-                scale: Vec3::splat(0.5),
+    for _event in event_reader.read() {
+        //spawn camera
+        commands.spawn((Camera2dBundle::default(), MainCamera, GameEntity));
+        //spawn mouse sprite
+        commands.spawn((
+            SpriteBundle {
+                texture: asset_server.load("crosshair/crossair_white.png"),
                 ..Default::default()
             },
-            ..Default::default()
-        },
-        Ship,
-        LookAtMouse,
-        ShipControllerBundle::default(),
-        LaserWeaponBundle::default(),
-    ));
-    //we need to try to find a sane spot to spawn this
-    let mut rng = rand::thread_rng();
-    let angle = rng.gen_range(0.0..(2.0 * PI));
-    let x = angle.cos();
-    let y = angle.sin();
-    let range = 900.0;
-    let speed = 30.0;
-
-    asteroid_event_writer.send(SpawnAsteroidEvent {
-        origin: Transform {
-            translation: Vec3 {
-                x: x * range,
-                y: y * range,
-                z: 0.0,
+            Mouse,
+            GameEntity,
+        ));
+        //spawn ship entity
+        commands.spawn((
+            SpriteBundle {
+                texture: asset_server.load("playerShip1_orange.png"),
+                transform: Transform {
+                    scale: Vec3::splat(0.5),
+                    ..Default::default()
+                },
+                ..Default::default()
             },
-            ..default()
-        },
-        class: AsteroidClass::Big,
-        velocity: LinearVelocity(Vec2 {
-            x: -x * speed,
-            y: -y * speed,
-        }),
-        angular: AngularVelocity::default(),
-    })
+            Ship,
+            LookAtMouse,
+            ShipControllerBundle::default(),
+            LaserWeaponBundle::default(),
+            ShipHealth(5),
+            GameEntity,
+        ));
+        //we need to try to find a sane spot to spawn this
+        let mut rng = rand::thread_rng();
+        let angle = rng.gen_range(0.0..(2.0 * PI));
+        let x = angle.cos();
+        let y = angle.sin();
+        let range = 900.0;
+        let speed = 30.0;
+
+        asteroid_event_writer.send(SpawnAsteroidEvent {
+            origin: Transform {
+                translation: Vec3 {
+                    x: x * range,
+                    y: y * range,
+                    z: 0.0,
+                },
+                ..default()
+            },
+            class: AsteroidClass::Big,
+            velocity: LinearVelocity(Vec2 {
+                x: -x * speed,
+                y: -y * speed,
+            }),
+            angular: AngularVelocity::default(),
+        })
+    }
 }
 
 /// We will store the world position of the mouse cursor here.
@@ -142,6 +158,11 @@ fn update_mouse_position_system(
 ) {
     // get the camera info and transform
     // assuming there is exactly one main camera entity, so Query::single() is OK
+    let result = camera_query.get_single();
+    match result {
+        Ok(_) => {}
+        Err(_) => return,
+    }
     let (camera, camera_transform) = camera_query.single();
 
     // There is only one primary window, so we can similarly get it from the query:
@@ -413,6 +434,7 @@ pub struct LaserBoltBundle {
     lifetime: Lifetime,
     layer: CollisionLayers,
     laser: Laser,
+    tag: GameEntity,
 }
 
 impl Default for LaserBoltBundle {
@@ -425,6 +447,7 @@ impl Default for LaserBoltBundle {
             lifetime: Lifetime(Timer::new(Duration::from_secs(5), TimerMode::Once)),
             layer: CollisionLayers::new([Layer::Blue], [Layer::Red]),
             laser: Laser,
+            tag: GameEntity,
         }
     }
 }
@@ -500,6 +523,7 @@ pub struct AsteroidBundle {
     class: AsteroidClass,
     angular_velocity: AngularVelocity,
     wrap: IgnoreWrapper,
+    tag: GameEntity,
 }
 
 impl Default for AsteroidBundle {
@@ -514,6 +538,7 @@ impl Default for AsteroidBundle {
             class: AsteroidClass::Big,
             angular_velocity: AngularVelocity::default(),
             wrap: IgnoreWrapper::False,
+            tag: GameEntity,
         }
     }
 }
@@ -591,7 +616,7 @@ pub enum EntityTypes {
 
 fn handle_collisions(
     mut events: EventReader<Collision>,
-    ships: Query<(Entity, &Ship)>,
+    mut ships: Query<(Entity, &Ship, &mut ShipHealth)>,
     lasers: Query<(Entity, &Laser)>,
     mut asteroids: Query<(Entity, &AsteroidClass, &mut AsteroidHealth)>,
     mut commands: Commands,
@@ -650,7 +675,20 @@ fn handle_collisions(
                     Err(_) => {}
                 }
             }
-            (EntityTypes::Asteroid, EntityTypes::Ship) => {}
+            (EntityTypes::Asteroid, EntityTypes::Ship) => {
+                let ship = ships.get_mut(event.0.entity2);
+                match ship {
+                    Ok(mut ship) => {
+                        ship.2 .0 -= 1;
+                        let asteroid = asteroids.get_mut(event.0.entity1);
+                        match asteroid {
+                            Ok(mut asteroid) => asteroid.2 .0 = 0,
+                            Err(_) => {}
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
             (EntityTypes::Laser, EntityTypes::Asteroid) => {
                 //despawn laser and decrement health of asteroid
                 commands.entity(event.0.entity1).despawn_recursive();
@@ -660,7 +698,20 @@ fn handle_collisions(
                     Err(_) => {}
                 }
             }
-            (EntityTypes::Ship, EntityTypes::Asteroid) => {}
+            (EntityTypes::Ship, EntityTypes::Asteroid) => {
+                let ship = ships.get_mut(event.0.entity1);
+                match ship {
+                    Ok(mut ship) => {
+                        ship.2 .0 -= 1;
+                        let asteroid = asteroids.get_mut(event.0.entity2);
+                        match asteroid {
+                            Ok(mut asteroid) => asteroid.2 .0 = 0,
+                            Err(_) => {}
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
             _ => {}
         }
     }
@@ -856,6 +907,7 @@ fn handle_upgrades(
     mut events: EventReader<WeaponUpgrade>,
     mut laser_query: Query<&mut ProjectileCount>,
     mut asteroid_events: EventWriter<SpawnAsteroidEvent>,
+    mut ship_query: Query<&mut ShipHealth>,
 ) {
     for _event in events.read() {
         info!("upgrade");
@@ -863,6 +915,10 @@ fn handle_upgrades(
             if laser.0 < u128::MAX {
                 laser.0 += 1;
             }
+        }
+        //add health
+        for mut ship in ship_query.iter_mut() {
+            ship.0 += 1;
         }
         //we need to try to find a sane spot to spawn this
         let mut rng = rand::thread_rng();
@@ -888,5 +944,36 @@ fn handle_upgrades(
             }),
             angular: AngularVelocity::default(),
         })
+    }
+}
+
+#[derive(Component)]
+pub struct ShipHealth(i8);
+
+#[derive(Event)]
+pub struct StartGameEvent;
+#[derive(Component)]
+pub struct GameEntity;
+
+fn handle_ship_damage(
+    ship_query: Query<&ShipHealth>,
+    mut commands: Commands,
+    entity_query: Query<Entity, With<GameEntity>>,
+    mut event_writer: EventWriter<StartGameEvent>,
+    mut asteroid_event_writer: ResMut<Events<SpawnAsteroidEvent>>,
+) {
+    let mut game_over = false;
+    for ship in ship_query.iter() {
+        if ship.0 <= 0 {
+            info!("Game Over");
+            game_over = true;
+        }
+    }
+    if game_over {
+        for entity in entity_query.iter() {
+            commands.entity(entity).despawn_recursive();
+        }
+        event_writer.send(StartGameEvent);
+        asteroid_event_writer.clear();
     }
 }
