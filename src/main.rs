@@ -29,9 +29,6 @@ fn main() {
                     maximize: false,
                     ..Default::default()
                 },
-                // This will spawn an invisible window
-                // The window will be made visible in the make_visible() system after 3 frames.
-                // This is useful when you want to avoid the white window that shows up before the GPU is ready to render the app.
                 visible: true,
                 ..default()
             }),
@@ -55,12 +52,15 @@ fn main() {
         .add_systems(Update, asteroid_spawner)
         .add_systems(Update, handle_collisions)
         .add_systems(Update, handle_destroyed_asteroids)
+        .add_systems(Update, handle_upgrades.after(handle_destroyed_asteroids))
         .add_systems(Update, wrapper)
         //physics
         .add_plugins(PhysicsPlugins::default())
         //no gravity
         .insert_resource(Gravity(Vec2::ZERO))
         .add_plugins(PhysicsDebugPlugin::default())
+        .init_resource::<Score>()
+        .add_event::<WeaponUpgrade>()
         .run();
 }
 
@@ -94,19 +94,30 @@ fn setup(
         ShipControllerBundle::default(),
         LaserWeaponBundle::default(),
     ));
+    //we need to try to find a sane spot to spawn this
+    let mut rng = rand::thread_rng();
+    let angle = rng.gen_range(0.0..(2.0 * PI));
+    let x = angle.cos();
+    let y = angle.sin();
+    let range = 900.0;
+    let speed = 30.0;
+
     asteroid_event_writer.send(SpawnAsteroidEvent {
         origin: Transform {
             translation: Vec3 {
-                x: 100.0,
-                y: 100.0,
+                x: x * range,
+                y: y * range,
                 z: 0.0,
             },
             ..default()
         },
         class: AsteroidClass::Big,
-        velocity: LinearVelocity::default(),
+        velocity: LinearVelocity(Vec2 {
+            x: -x * speed,
+            y: -y * speed,
+        }),
         angular: AngularVelocity::default(),
-    });
+    })
 }
 
 /// We will store the world position of the mouse cursor here.
@@ -305,11 +316,16 @@ pub struct RateOfFire(i8);
 #[derive(Component)]
 struct FireTimer(Timer);
 
+//this is in rounds per minute
+#[derive(Component, Default)]
+pub struct ProjectileCount(u128);
+
 //bundle for the laser weapon
 #[derive(Bundle)]
 pub struct LaserWeaponBundle {
     rate_of_fire: RateOfFire,
     fire_timer: FireTimer,
+    projectile_count: ProjectileCount,
 }
 
 impl Default for LaserWeaponBundle {
@@ -320,20 +336,33 @@ impl Default for LaserWeaponBundle {
                 Duration::from_secs_f32(60.0 / 120.0),
                 TimerMode::Once,
             )),
+            projectile_count: ProjectileCount(1),
         }
     }
 }
+#[derive(Component)]
+pub struct Spread(f32);
 
 /// An event sent for a firing a laser
 #[derive(Event)]
 pub struct SpawnLaserEvent {
     origin: Transform,
+    spread: Spread,
 }
 
 fn update_weapons(
     time: Res<Time>,
     mut input_event_reader: EventReader<InputAction>,
-    mut ship_query: Query<(&mut FireTimer, &RateOfFire, &Transform, &LinearVelocity), With<Ship>>,
+    mut ship_query: Query<
+        (
+            &mut FireTimer,
+            &RateOfFire,
+            &Transform,
+            &LinearVelocity,
+            &ProjectileCount,
+        ),
+        With<Ship>,
+    >,
     mut fire_laser_event_writer: EventWriter<SpawnLaserEvent>,
 ) {
     let delta_time = time.delta();
@@ -347,9 +376,15 @@ fn update_weapons(
                 InputAction::Fire => {
                     //if the timer is finished we can pew
                     if ship.0 .0.finished() {
-                        fire_laser_event_writer.send(SpawnLaserEvent {
-                            origin: ship.2.clone(),
-                        });
+                        let step = 2.5 * PI / 180.0;
+                        let spread = step * (ship.4 .0 - 1) as f32;
+                        let left = -spread / 2.0;
+                        for x in 0..ship.4 .0 {
+                            fire_laser_event_writer.send(SpawnLaserEvent {
+                                origin: ship.2.clone(),
+                                spread: Spread(left + (step * x as f32)),
+                            });
+                        }
                         ship.0 .0.reset();
                     }
                 }
@@ -400,12 +435,13 @@ fn laser_spawner(
     mut commands: Commands,
 ) {
     for event in reader.read() {
-        info!("pew");
+        // info!("pew");
         //spawn laser bolt
         //speed
         let speed = 500.0;
         let euler_rots = event.origin.rotation.to_euler(EulerRot::XYZ);
-        let z_rot = euler_rots.2 + PI / 2.0;
+        let z_rot = event.spread.0 + euler_rots.2 + PI / 2.0;
+        info!("spread:{}", event.spread.0);
         let x = z_rot.cos();
         let y = z_rot.sin();
         commands.spawn(LaserBoltBundle {
@@ -463,6 +499,7 @@ pub struct AsteroidBundle {
     health: AsteroidHealth,
     class: AsteroidClass,
     angular_velocity: AngularVelocity,
+    wrap: IgnoreWrapper,
 }
 
 impl Default for AsteroidBundle {
@@ -476,6 +513,7 @@ impl Default for AsteroidBundle {
             health: AsteroidHealth(5),
             class: AsteroidClass::Big,
             angular_velocity: AngularVelocity::default(),
+            wrap: IgnoreWrapper::False,
         }
     }
 }
@@ -510,6 +548,10 @@ impl AsteroidBundle {
             AsteroidClass::Small => 3,
             AsteroidClass::Tiny => 2,
         };
+        let wrap = match event.class {
+            AsteroidClass::Big => IgnoreWrapper::True,
+            _ => IgnoreWrapper::False,
+        };
 
         commands.spawn(AsteroidBundle {
             sprite_bundle: SpriteBundle {
@@ -522,6 +564,7 @@ impl AsteroidBundle {
             health: AsteroidHealth(health),
             class: event.class,
             angular_velocity: event.angular,
+            wrap: wrap,
             ..default()
         });
     }
@@ -533,7 +576,7 @@ fn asteroid_spawner(
     mut commands: Commands,
 ) {
     for event in reader.read() {
-        info!("thwomp");
+        // info!("thwomp");
         //spawn asteroid
         AsteroidBundle::spawn(event, &asset_server, &mut commands);
     }
@@ -554,10 +597,10 @@ fn handle_collisions(
     mut commands: Commands,
 ) {
     for event in events.read() {
-        info!(
-            "{:?} and {:?} are colliding",
-            event.0.entity1, event.0.entity2
-        );
+        // info!(
+        //     "{:?} and {:?} are colliding",
+        //     event.0.entity1, event.0.entity2
+        // );
 
         let asteroid = asteroids.get(event.0.entity1);
         let thing1 = match asteroid {
@@ -596,7 +639,7 @@ fn handle_collisions(
         //this is all really ugly
         match (thing1, thing2) {
             (EntityTypes::Asteroid, EntityTypes::Asteroid) => {
-                info!("bounce")
+                // info!("bounce")
             }
             (EntityTypes::Asteroid, EntityTypes::Laser) => {
                 //despawn laser and decrement health of asteroid
@@ -633,6 +676,8 @@ fn handle_destroyed_asteroids(
     )>,
     mut commands: Commands,
     mut asteroid_event_writer: EventWriter<SpawnAsteroidEvent>,
+    mut score: ResMut<Score>,
+    mut upgrade_writer: EventWriter<WeaponUpgrade>,
 ) {
     let mut rng = rand::thread_rng();
     let speed = 45.0;
@@ -640,6 +685,12 @@ fn handle_destroyed_asteroids(
     for asteroid in asteroids.iter() {
         if asteroid.2 .0 <= 0 {
             commands.entity(asteroid.0).despawn_recursive();
+            //boom
+            score.0 += 1;
+            info!("score: {}", score.0);
+            if score.0 % 5 == 0 {
+                upgrade_writer.send(WeaponUpgrade);
+            }
             //spawn the children!
             match asteroid.1 {
                 AsteroidClass::Big => {
@@ -749,19 +800,93 @@ fn handle_destroyed_asteroids(
     }
 }
 
-fn wrapper(mut wrapped_entities_query: Query<&mut Transform, Or<(&Ship, &AsteroidClass)>>) {
-    for mut entity in wrapped_entities_query.iter_mut() {
-        if entity.translation.y > 360.0 {
-            entity.translation.y = -entity.translation.y + 1.0;
+fn wrapper(
+    mut wrapped_entities_query: Query<
+        (&mut Transform, Option<&mut IgnoreWrapper>, &Collider),
+        Or<(&Ship, &AsteroidClass)>,
+    >,
+) {
+    for (mut transform, ignore_wrapper, collider) in wrapped_entities_query.iter_mut() {
+        match ignore_wrapper {
+            Some(mut wrapper) => match *wrapper {
+                IgnoreWrapper::False => {}
+                IgnoreWrapper::True => {
+                    if transform.translation.x.abs() < 350.0
+                        && transform.translation.y.abs() < 630.0
+                    {
+                        *wrapper = IgnoreWrapper::False;
+                    }
+                    match *wrapper {
+                        IgnoreWrapper::False => {}
+                        IgnoreWrapper::True => continue,
+                    }
+                }
+            },
+            None => {}
         }
-        if entity.translation.x > 640.0 {
-            entity.translation.x = -entity.translation.x + 1.0;
+        let huh = collider.shape_scaled();
+        let size = huh.compute_local_bounding_sphere().radius();
+        if transform.translation.y > 360.0 + size {
+            transform.translation.y = -transform.translation.y + 1.0;
         }
-        if entity.translation.y < -360.0 {
-            entity.translation.y = -entity.translation.y - 1.0;
+        if transform.translation.x > 640.0 + size {
+            transform.translation.x = -transform.translation.x + 1.0;
         }
-        if entity.translation.x < -640.0 {
-            entity.translation.x = -entity.translation.x - 1.0;
+        if transform.translation.y < -360.0 - size {
+            transform.translation.y = -transform.translation.y - 1.0;
         }
+        if transform.translation.x < -640.0 - size {
+            transform.translation.x = -transform.translation.x - 1.0;
+        }
+    }
+}
+#[derive(Resource, Default)]
+pub struct Score(i128);
+
+#[derive(Event)]
+pub struct WeaponUpgrade;
+#[derive(Component, Default)]
+pub enum IgnoreWrapper {
+    #[default]
+    False,
+    True,
+}
+
+fn handle_upgrades(
+    mut events: EventReader<WeaponUpgrade>,
+    mut laser_query: Query<&mut ProjectileCount>,
+    mut asteroid_events: EventWriter<SpawnAsteroidEvent>,
+) {
+    for _event in events.read() {
+        info!("upgrade");
+        for mut laser in laser_query.iter_mut() {
+            if laser.0 < u128::MAX {
+                laser.0 += 1;
+            }
+        }
+        //we need to try to find a sane spot to spawn this
+        let mut rng = rand::thread_rng();
+        let angle = rng.gen_range(0.0..(2.0 * PI));
+        let x = angle.cos();
+        let y = angle.sin();
+        let range = 900.0;
+        let speed = 15.0;
+
+        asteroid_events.send(SpawnAsteroidEvent {
+            origin: Transform {
+                translation: Vec3 {
+                    x: x * range,
+                    y: y * range,
+                    z: 0.0,
+                },
+                ..default()
+            },
+            class: AsteroidClass::Big,
+            velocity: LinearVelocity(Vec2 {
+                x: -x * speed,
+                y: -y * speed,
+            }),
+            angular: AngularVelocity::default(),
+        })
     }
 }
