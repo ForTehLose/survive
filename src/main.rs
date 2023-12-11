@@ -1,4 +1,4 @@
-use std::{default, f32::consts::PI, time::Duration};
+use std::{f32::consts::PI, time::Duration};
 
 use bevy::{
     asset::AssetMetaCheck,
@@ -6,6 +6,7 @@ use bevy::{
     window::{CursorGrabMode, PresentMode, PrimaryWindow, WindowTheme},
 };
 use bevy_xpbd_2d::{math::Scalar, parry::na::ComplexField, prelude::*};
+use rand::Rng;
 
 fn main() {
     App::new()
@@ -49,6 +50,12 @@ fn main() {
         .add_systems(Update, update_weapons.after(proto_input))
         .add_event::<SpawnLaserEvent>()
         .add_systems(Update, laser_spawner.after(update_weapons))
+        .add_systems(PostUpdate, update_lifetimes)
+        .add_event::<SpawnAsteroidEvent>()
+        .add_systems(Update, asteroid_spawner)
+        .add_systems(Update, handle_collisions)
+        .add_systems(Update, handle_destroyed_asteroids)
+        .add_systems(Update, wrapper)
         //physics
         .add_plugins(PhysicsPlugins::default())
         //no gravity
@@ -57,7 +64,11 @@ fn main() {
         .run();
 }
 
-fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn setup(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut asteroid_event_writer: EventWriter<SpawnAsteroidEvent>,
+) {
     //spawn camera
     commands.spawn((Camera2dBundle::default(), MainCamera));
     //spawn mouse sprite
@@ -81,8 +92,21 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         Ship,
         LookAtMouse,
         ShipControllerBundle::default(),
-        laserWeaponBundle::default(),
+        LaserWeaponBundle::default(),
     ));
+    asteroid_event_writer.send(SpawnAsteroidEvent {
+        origin: Transform {
+            translation: Vec3 {
+                x: 100.0,
+                y: 100.0,
+                z: 0.0,
+            },
+            ..default()
+        },
+        class: AsteroidClass::Big,
+        velocity: LinearVelocity::default(),
+        angular: AngularVelocity::default(),
+    });
 }
 
 /// We will store the world position of the mouse cursor here.
@@ -283,16 +307,19 @@ struct FireTimer(Timer);
 
 //bundle for the laser weapon
 #[derive(Bundle)]
-pub struct laserWeaponBundle {
+pub struct LaserWeaponBundle {
     rate_of_fire: RateOfFire,
     fire_timer: FireTimer,
 }
 
-impl Default for laserWeaponBundle {
+impl Default for LaserWeaponBundle {
     fn default() -> Self {
         Self {
             rate_of_fire: RateOfFire(60),
-            fire_timer: FireTimer(Timer::new(Duration::from_secs(1), TimerMode::Once)),
+            fire_timer: FireTimer(Timer::new(
+                Duration::from_secs_f32(60.0 / 120.0),
+                TimerMode::Once,
+            )),
         }
     }
 }
@@ -339,6 +366,8 @@ enum Layer {
     Blue,
     Red,
 }
+#[derive(Component)]
+pub struct Laser;
 
 #[derive(Bundle)]
 pub struct LaserBoltBundle {
@@ -348,6 +377,7 @@ pub struct LaserBoltBundle {
     linear_velocity: LinearVelocity,
     lifetime: Lifetime,
     layer: CollisionLayers,
+    laser: Laser,
 }
 
 impl Default for LaserBoltBundle {
@@ -359,6 +389,7 @@ impl Default for LaserBoltBundle {
             linear_velocity: Default::default(),
             lifetime: Lifetime(Timer::new(Duration::from_secs(5), TimerMode::Once)),
             layer: CollisionLayers::new([Layer::Blue], [Layer::Red]),
+            laser: Laser,
         }
     }
 }
@@ -386,5 +417,351 @@ fn laser_spawner(
             linear_velocity: LinearVelocity(Vec2 { x: x, y: y } * speed),
             ..default()
         });
+    }
+}
+//TODO update this to spawn events so others can listen for them
+fn update_lifetimes(
+    mut lifetimes_query: Query<(Entity, &mut Lifetime)>,
+    time: Res<Time>,
+    mut commands: Commands,
+) {
+    let delta = time.delta();
+    for (entity, mut lifetime) in lifetimes_query.iter_mut() {
+        lifetime.0.tick(delta);
+        if lifetime.0.finished() {
+            commands.entity(entity).despawn_recursive();
+        }
+    }
+}
+#[derive(Component, Debug, Clone, Copy)]
+pub enum AsteroidClass {
+    Big,
+    Medium,
+    Small,
+    Tiny,
+}
+
+/// An event sent for a firing a laser
+#[derive(Event)]
+pub struct SpawnAsteroidEvent {
+    origin: Transform,
+    class: AsteroidClass,
+    velocity: LinearVelocity,
+    angular: AngularVelocity,
+}
+
+#[derive(Component)]
+pub struct AsteroidHealth(i8);
+
+#[derive(Bundle)]
+pub struct AsteroidBundle {
+    sprite_bundle: SpriteBundle,
+    rigid_body: RigidBody,
+    collider: Collider,
+    linear_velocity: LinearVelocity,
+    layer: CollisionLayers,
+    health: AsteroidHealth,
+    class: AsteroidClass,
+    angular_velocity: AngularVelocity,
+}
+
+impl Default for AsteroidBundle {
+    fn default() -> Self {
+        Self {
+            sprite_bundle: Default::default(),
+            rigid_body: RigidBody::Dynamic,
+            collider: Collider::ball(50.0),
+            linear_velocity: Default::default(),
+            layer: CollisionLayers::new([Layer::Red], [Layer::Red, Layer::Blue]),
+            health: AsteroidHealth(5),
+            class: AsteroidClass::Big,
+            angular_velocity: AngularVelocity::default(),
+        }
+    }
+}
+
+impl AsteroidBundle {
+    pub fn spawn(
+        event: &SpawnAsteroidEvent,
+        asset_server: &Res<AssetServer>,
+        commands: &mut Commands,
+    ) {
+        let sprite = match event.class {
+            AsteroidClass::Big => "meteors/meteorGrey_big1.png",
+            AsteroidClass::Medium => "meteors/meteorGrey_med1.png",
+            AsteroidClass::Small => "meteors/meteorGrey_small1.png",
+            AsteroidClass::Tiny => "meteors/meteorGrey_tiny1.png",
+        };
+        let scale = match event.class {
+            AsteroidClass::Big => 2.0,
+            AsteroidClass::Medium => 1.5,
+            AsteroidClass::Small => 1.0,
+            AsteroidClass::Tiny => 1.0,
+        };
+        let collider_size = match event.class {
+            AsteroidClass::Big => 50.0,
+            AsteroidClass::Medium => 22.0,
+            AsteroidClass::Small => 15.0,
+            AsteroidClass::Tiny => 6.0,
+        };
+        let health: i8 = match event.class {
+            AsteroidClass::Big => 5,
+            AsteroidClass::Medium => 4,
+            AsteroidClass::Small => 3,
+            AsteroidClass::Tiny => 2,
+        };
+
+        commands.spawn(AsteroidBundle {
+            sprite_bundle: SpriteBundle {
+                texture: asset_server.load(sprite),
+                transform: event.origin.with_scale(Vec3::splat(scale)),
+                ..Default::default()
+            },
+            collider: Collider::ball(collider_size),
+            linear_velocity: event.velocity,
+            health: AsteroidHealth(health),
+            class: event.class,
+            angular_velocity: event.angular,
+            ..default()
+        });
+    }
+}
+
+fn asteroid_spawner(
+    mut reader: EventReader<SpawnAsteroidEvent>,
+    asset_server: Res<AssetServer>,
+    mut commands: Commands,
+) {
+    for event in reader.read() {
+        info!("thwomp");
+        //spawn asteroid
+        AsteroidBundle::spawn(event, &asset_server, &mut commands);
+    }
+}
+
+pub enum EntityTypes {
+    Asteroid,
+    Laser,
+    Ship,
+    Unknown,
+}
+
+fn handle_collisions(
+    mut events: EventReader<Collision>,
+    ships: Query<(Entity, &Ship)>,
+    lasers: Query<(Entity, &Laser)>,
+    mut asteroids: Query<(Entity, &AsteroidClass, &mut AsteroidHealth)>,
+    mut commands: Commands,
+) {
+    for event in events.read() {
+        info!(
+            "{:?} and {:?} are colliding",
+            event.0.entity1, event.0.entity2
+        );
+
+        let asteroid = asteroids.get(event.0.entity1);
+        let thing1 = match asteroid {
+            Ok(_) => EntityTypes::Asteroid,
+            Err(_) => {
+                let laser = lasers.get(event.0.entity1);
+                match laser {
+                    Ok(_) => EntityTypes::Laser,
+                    Err(_) => {
+                        let ship = ships.get(event.0.entity1);
+                        match ship {
+                            Ok(_) => EntityTypes::Ship,
+                            Err(_) => EntityTypes::Unknown,
+                        }
+                    }
+                }
+            }
+        };
+        let asteroid = asteroids.get(event.0.entity2);
+        let thing2 = match asteroid {
+            Ok(_) => EntityTypes::Asteroid,
+            Err(_) => {
+                let laser = lasers.get(event.0.entity2);
+                match laser {
+                    Ok(_) => EntityTypes::Laser,
+                    Err(_) => {
+                        let ship = ships.get(event.0.entity2);
+                        match ship {
+                            Ok(_) => EntityTypes::Ship,
+                            Err(_) => EntityTypes::Unknown,
+                        }
+                    }
+                }
+            }
+        };
+        //this is all really ugly
+        match (thing1, thing2) {
+            (EntityTypes::Asteroid, EntityTypes::Asteroid) => {
+                info!("bounce")
+            }
+            (EntityTypes::Asteroid, EntityTypes::Laser) => {
+                //despawn laser and decrement health of asteroid
+                commands.entity(event.0.entity2).despawn_recursive();
+                let asteroid = asteroids.get_mut(event.0.entity1);
+                match asteroid {
+                    Ok(mut asteroid) => asteroid.2 .0 -= 1,
+                    Err(_) => {}
+                }
+            }
+            (EntityTypes::Asteroid, EntityTypes::Ship) => {}
+            (EntityTypes::Laser, EntityTypes::Asteroid) => {
+                //despawn laser and decrement health of asteroid
+                commands.entity(event.0.entity1).despawn_recursive();
+                let asteroid = asteroids.get_mut(event.0.entity2);
+                match asteroid {
+                    Ok(mut asteroid) => asteroid.2 .0 -= 1,
+                    Err(_) => {}
+                }
+            }
+            (EntityTypes::Ship, EntityTypes::Asteroid) => {}
+            _ => {}
+        }
+    }
+}
+
+fn handle_destroyed_asteroids(
+    asteroids: Query<(
+        Entity,
+        &AsteroidClass,
+        &AsteroidHealth,
+        &Transform,
+        &LinearVelocity,
+    )>,
+    mut commands: Commands,
+    mut asteroid_event_writer: EventWriter<SpawnAsteroidEvent>,
+) {
+    let mut rng = rand::thread_rng();
+    let speed = 45.0;
+    let rot_speed = 5.0;
+    for asteroid in asteroids.iter() {
+        if asteroid.2 .0 <= 0 {
+            commands.entity(asteroid.0).despawn_recursive();
+            //spawn the children!
+            match asteroid.1 {
+                AsteroidClass::Big => {
+                    //we have a lot of children to spawn lol
+                    //center
+                    asteroid_event_writer.send(SpawnAsteroidEvent {
+                        origin: Transform {
+                            translation: asteroid.3.translation,
+                            ..default()
+                        },
+                        class: AsteroidClass::Medium,
+                        velocity: LinearVelocity::default(),
+                        angular: AngularVelocity::default(),
+                    });
+                    let count = 6.0;
+                    let step = 2.0 * PI / count;
+                    //angle offset
+                    let angle_offset = rng.gen_range(0.0..360.0);
+
+                    info!("offset : {}", angle_offset);
+                    for n in 1..=6 {
+                        //velocity
+                        let x = rng.gen_range(-speed..speed);
+                        let y = rng.gen_range(-speed..speed);
+                        let velocity = Vec2 {
+                            x: asteroid.4 .0.x + x,
+                            y: asteroid.4 .0.y + y,
+                        };
+                        let rot = rng.gen_range(-rot_speed..rot_speed);
+                        let translation = asteroid.3.translation
+                            + Quat::from_rotation_z(angle_offset + n as f32 * step)
+                                .mul_vec3(Vec3::Y * 68.0);
+                        asteroid_event_writer.send(SpawnAsteroidEvent {
+                            origin: Transform {
+                                translation: translation,
+                                ..default()
+                            },
+                            class: AsteroidClass::Medium,
+                            velocity: LinearVelocity(velocity),
+                            angular: AngularVelocity(rot),
+                        });
+                    }
+                }
+                AsteroidClass::Medium => {
+                    //we have a lot of children to spawn lol
+                    let count = 3.0;
+                    let step = 2.0 * PI / count;
+                    //angle offset
+                    let angle_offset = rng.gen_range(0.0..360.0);
+                    //velocity
+
+                    for n in 1..=3 {
+                        let x = rng.gen_range(-speed..speed);
+                        let y = rng.gen_range(-speed..speed);
+                        let velocity = Vec2 {
+                            x: asteroid.4 .0.x + x,
+                            y: asteroid.4 .0.y + y,
+                        };
+                        let rot = rng.gen_range(-rot_speed..rot_speed);
+                        let translation = asteroid.3.translation
+                            + Quat::from_rotation_z(angle_offset + n as f32 * step)
+                                .mul_vec3(Vec3::Y * 20.0);
+                        asteroid_event_writer.send(SpawnAsteroidEvent {
+                            origin: Transform {
+                                translation: translation,
+                                ..default()
+                            },
+                            class: AsteroidClass::Small,
+                            velocity: LinearVelocity(velocity),
+                            angular: AngularVelocity(rot),
+                        });
+                    }
+                }
+                AsteroidClass::Small => {
+                    //we have a lot of children to spawn lol
+                    let count = 4.0;
+                    let step = 2.0 * PI / count;
+                    //angle offset
+                    let angle_offset = rng.gen_range(0.0..360.0);
+
+                    for n in 1..=4 {
+                        //velocity
+                        let x = rng.gen_range(-speed..speed);
+                        let y = rng.gen_range(-speed..speed);
+                        let velocity = Vec2 {
+                            x: asteroid.4 .0.x + x,
+                            y: asteroid.4 .0.y + y,
+                        };
+                        let rot = rng.gen_range(-rot_speed..rot_speed);
+                        let translation = asteroid.3.translation
+                            + Quat::from_rotation_z(angle_offset + n as f32 * step)
+                                .mul_vec3(Vec3::Y * 10.0);
+                        asteroid_event_writer.send(SpawnAsteroidEvent {
+                            origin: Transform {
+                                translation: translation,
+                                ..default()
+                            },
+                            class: AsteroidClass::Tiny,
+                            velocity: LinearVelocity(velocity),
+                            angular: AngularVelocity(rot),
+                        });
+                    }
+                }
+                AsteroidClass::Tiny => {}
+            };
+        }
+    }
+}
+
+fn wrapper(mut wrapped_entities_query: Query<&mut Transform, Or<(&Ship, &AsteroidClass)>>) {
+    for mut entity in wrapped_entities_query.iter_mut() {
+        if entity.translation.y > 360.0 {
+            entity.translation.y = -entity.translation.y + 1.0;
+        }
+        if entity.translation.x > 640.0 {
+            entity.translation.x = -entity.translation.x + 1.0;
+        }
+        if entity.translation.y < -360.0 {
+            entity.translation.y = -entity.translation.y - 1.0;
+        }
+        if entity.translation.x < -640.0 {
+            entity.translation.x = -entity.translation.x - 1.0;
+        }
     }
 }
